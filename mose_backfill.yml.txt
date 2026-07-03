@@ -1,0 +1,67 @@
+name: MOSE XAUUSD Backfill
+
+# Cara pakai:
+#  1. Uji 1 bulan dulu: Actions tab -> Run workflow -> year=2015, months="6"
+#  2. Kalau sukses & tervalidasi manual, jalankan per tahun: months="1,2,3,4,5,6,7,8,9,10,11,12"
+#  3. Ulangi untuk tiap tahun mundur sampai tahun target (mis. 2014-2023)
+#  4. Setelah backfill selesai, aktifkan trigger `schedule` di bawah untuk
+#     update bulanan otomatis (uncomment).
+
+on:
+  workflow_dispatch:
+    inputs:
+      year:
+        description: "Tahun (mis. 2015)"
+        required: true
+        type: string
+      months:
+        description: "Daftar bulan dipisah koma, mis. 1,2,3"
+        required: true
+        default: "1,2,3,4,5,6,7,8,9,10,11,12"
+        type: string
+  # schedule:
+  #   - cron: "0 3 3 * *"   # tanggal 3 tiap bulan, 03:00 UTC — update bulan lalu
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340   # sisakan buffer dari batas keras 360 menit (6 jam)
+    strategy:
+      fail-fast: false     # 1 bulan gagal tidak boleh membatalkan bulan lain
+      matrix:
+        month: ${{ fromJSON(format('[{0}]', github.event.inputs.months)) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r scripts/requirements.txt
+
+      - name: Ingest bulan ${{ matrix.month }}/${{ github.event.inputs.year }}
+        working-directory: scripts
+        run: |
+          python ingest_month.py --year ${{ github.event.inputs.year }} --month ${{ matrix.month }}
+
+      - name: Install rclone
+        run: curl https://rclone.org/install.sh | sudo bash
+
+      - name: Setup rclone config dari secret
+        run: |
+          mkdir -p ~/.config/rclone
+          echo "${{ secrets.RCLONE_CONF_B64 }}" | base64 -d > ~/.config/rclone/rclone.conf
+
+      - name: Upload ke Google Drive
+        run: |
+          rclone copy /tmp/mose_out/01_parquet \
+            "gdrive:MOSE/data/01_parquet" \
+            --create-empty-src-dirs -v
+
+      - name: Upload rejected rows (kalau ada) untuk audit
+        run: |
+          if [ -d /tmp/mose_temp/rejected_rows ]; then
+            rclone copy /tmp/mose_temp/rejected_rows \
+              "gdrive:MOSE/data/metadata/rejected_rows" -v
+          fi
